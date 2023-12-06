@@ -1,0 +1,160 @@
+---
+title: "R Notebook"
+output: html_notebook
+editor_options: 
+  chunk_output_type: console
+---
+
+## Preamble
+```{r}
+library(enrichplot)
+library(org.Mm.eg.db)
+library(customplotr)
+library(ReactomePA)
+library(clusterProfiler)
+library(RColorBrewer)
+library(tidyverse)
+
+source("helper_functions.R")
+```
+
+## Import
+```{r}
+peaks <- readRDS("peaks.Rds")
+peaks_res <- readRDS("peaks_res.Rds")
+peaks_sig_up <- readRDS("peaks_sig_up.Rds")
+overlap_RNA_ATAC <- read_tsv("overlap_RNA_ATAC.tsv")
+```
+
+
+## GSA
+```{r}
+atac_genes_sig_up <-
+  mcols(peaks_sig_up) %>%
+  as_tibble() %>%
+  arrange(geneId) %>%
+  distinct(geneId, .keep_all = TRUE) %>%
+  pull(geneId)
+
+atac_genes_sig_up_symbol <-
+  mcols(peaks_sig_up) %>%
+  as_tibble() %>%
+  arrange(geneId) %>%
+  distinct(geneId, .keep_all = TRUE) %>%
+  pull(SYMBOL)
+
+## ------------------------------------------------------------
+## Reactome
+## ------------------------------------------------------------
+pw_reactome <- enrichPathway(atac_genes_sig_up,
+                             organism = "mouse", 
+                             readable = TRUE, pvalueCutoff = 0.05, pAdjustMethod = "BH")
+pw_reactome <- DOSE::setReadable(pw_reactome, OrgDb = org.Mm.eg.db)
+
+reactome_res <- 
+  pw_reactome@result %>% 
+  filter(p.adjust < 0.1) %>%
+  as_tibble() %>%
+  select(Description, GeneRatio, p.adjust, geneID)
+
+pdf("plots/gsa_reactome.pdf", width = 5, height = 4, useDingbats = FALSE)
+dotplot(pw_reactome, showCategory = 60) +
+  theme_dotplot +
+  scale_size_continuous(range = c(1,4)) +
+  theme(legend.key.size = unit(.3, "cm"))
+dev.off()
+
+
+pw_reactome <- enrichplot::pairwise_termsim(pw_reactome)
+plot_emap <- 
+  emapplot(pw_reactome, 
+           cex_label_category = 0.25, 
+           cex_line = 0.2, 
+           cex_category = 0.3, layout = "kk", 
+           showCategory = 60, 
+           shadowtext = FALSE, 
+           # group_category = TRUE, group_legend = TRUE, nCluster = 4, 
+           repel = TRUE, 
+           #pinode_label = "category", 
+           ) +
+  theme(legend.text = element_text(size = 5), 
+        legend.title = element_text(size = 6), 
+        legend.key.size = unit(2, "mm")) +
+  NULL
+
+pdf("plots/reactome_emap.pdf", width = 5, height = 5, useDingbats = FALSE)
+plot_emap
+dev.off()
+
+## ------------------------------------------------------------
+## GO
+## ------------------------------------------------------------
+pw_GO <- enrichGO(atac_genes_sig_up,
+                  OrgDb = org.Mm.eg.db, 
+                  readable = TRUE, 
+                  pvalueCutoff = 0.05, pAdjustMethod = "BH")
+pw_GO <- DOSE::setReadable(pw_reactome, OrgDb = org.Mm.eg.db)
+
+GO_res <- 
+  pw_reactome@result %>% 
+  filter(p.adjust < 0.1) %>%
+  as_tibble() %>%
+  select(Description, GeneRatio, p.adjust, geneID)
+
+pdf("plots/gsa_GO.pdf", width = 3, height = 1.4, useDingbats = FALSE)
+dotplot(pw_GO) +
+  theme_dotplot +
+  scale_size_continuous(range = c(0.5,2)) +
+  theme(legend.key.size = unit(.1, "cm"))
+dev.off()
+
+## ------------------------------------------------------------
+## KEGG
+## ------------------------------------------------------------
+pw_KEGG <- enrichKEGG(overlap_RNA_ATAC$ENTREZ,
+                             organism = "mouse", 
+                      pAdjustMethod = "BH")
+# pw_KEGG <- DOSE::setReadable(pw_KEGG, OrgDb = org.Mm.eg.db)
+
+KEGG_res <- 
+  pw_KEGG@result %>% 
+  filter(p.adjust < 0.1) %>%
+  as_tibble() %>%
+  select(Description, GeneRatio, p.adjust, geneID)
+
+pdf("plots/gsa_KEGG.pdf", width = 4, height = 1.25, useDingbats = FALSE)
+dotplot(pw_KEGG, showCategory = 60) +
+  theme_dotplot +
+  scale_size_continuous(range = c(1,4)) +
+  theme(legend.key.size = unit(.3, "cm"))
+dev.off()
+
+## ------------------------------------------------------------
+## Reactome with overlap RNA/ATACseq
+## ------------------------------------------------------------
+pw_reactome_overlap <- enrichPathway(overlap_RNA_ATAC$ENTREZ,
+                             organism = "mouse", 
+                             readable = TRUE, pAdjustMethod = "BH")
+pw_reactome_overlap <- DOSE::setReadable(pw_reactome_overlap, OrgDb = org.Mm.eg.db)
+
+reactome_overlap_res <- 
+  pw_reactome_overlap@result %>% 
+  filter(p.adjust < 0.1) %>%
+  as_tibble() %>%
+  select(Description, GeneRatio, p.adjust, geneID)
+
+pdf("plots/gsa_overlap_reactome.pdf", width = 4, height = 1.25, useDingbats = FALSE)
+dotplot(pw_reactome_overlap, showCategory = 60) +
+  theme_dotplot +
+  scale_size_continuous(range = c(1,4)) +
+  theme(legend.key.size = unit(.3, "cm"))
+dev.off()
+```
+
+## 
+```{r}
+
+
+
+
+```

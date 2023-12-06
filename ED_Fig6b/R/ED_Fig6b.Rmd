@@ -1,0 +1,82 @@
+---
+title: "RNAseq of CD11c+ cells of B6 wt vs. ApoE-KO"
+output:
+  github_document: default
+  rmarkdown::github_document: default
+editor_options:
+  chunk_output_type: console
+---
+
+## Load libraries
+```{r, message=FALSE, warning=FALSE}
+
+## Load libraries
+library(DESeq2)
+library(NMF)
+library(tidyverse)
+```
+
+## Read in data
+```{r}
+## Get read counts
+read_counts <- read.csv("counts.csv", header = TRUE, row.names = 1)
+
+## Create DESeq2 object
+condition <- factor(c(rep("wt", 6), rep("KO", 6)), levels = c("wt", "KO"))
+sample_info <- data.frame(condition = condition, 
+                          row.names = names(read_counts))
+dds <- DESeqDataSetFromMatrix(countData = read_counts,
+                              colData = sample_info,
+                              design = ~ condition)
+```
+
+## Read count transformations
+```{r}
+## Remove genes with 0 counts
+dds <- dds[rowSums(counts(dds)) > 0, ]
+
+## Normalize read counts to library size
+dds <- estimateSizeFactors(dds)
+counts_norm <- counts(dds, normalized = TRUE)
+
+## log2-transform normalized read counts using a pseudocount of 1
+counts_norm_log <- 
+  log2(counts_norm + 1) |>
+  as.data.frame()
+```
+
+# Heatmaps
+```{R}
+## Define gene sets
+gene_sets <- list()
+gene_sets$MHC_genes <- c("H2-D1", "H2-K1","B2m", "H2-Aa", "H2-Ab1", "H2-Eb1", "H2-Eb2") 
+gene_sets$antigen_pres <- c("Psmb8", "Psmb9", "Tap1", "Tap2", "Tapbp", "Psme2")
+gene_sets$costimulation <- c("Cd40", "Cd80", "Cd86", "Icam1")
+
+## Plot heatmaps
+plot_hm <- function(counts_norm, gene_set){
+  plot_hm <-
+    aheatmap(counts_norm[gene_set,],
+             scale = "row",
+             color = colorRampPalette(c("navy", "white", "firebrick3"))(50),
+             fontsize = 9,
+             cexRow = 1,
+             cexCol = 0.5,
+             cellwidth = 7,
+             cellheight = 8,
+             border_color = "white",
+             width = 2.5,
+             height = 1.5,
+             Colv = NA, 
+             Rowv = NA)
+}
+
+plot_hm(counts_norm_log, gene_sets$MHC_genes)
+plot_hm(counts_norm_log, gene_sets$antigen_pres)
+plot_hm(counts_norm_log, gene_sets$costimulation)
+```
+
+## Session info
+```{r}
+devtools::session_info()
+```

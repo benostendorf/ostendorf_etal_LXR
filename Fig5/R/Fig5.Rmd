@@ -1,0 +1,194 @@
+---
+title: "Fig_05"
+author: "Benjamin Ostendorf"
+date: "2023/04/24"
+output: rmarkdown::github_document
+---
+
+## Preamble
+```{r, message=FALSE, warning=FALSE}
+library(DESeq2)
+library(ComplexHeatmap)
+library(clusterProfiler)
+library(AnnotationDbi)
+library(org.Mm.eg.db)
+library(tidyverse)
+
+## Color palette
+cols_RGX <- c("ctrl" = "#A9A9A8", "tx" = "#0095FF")
+```
+
+## Import data
+```{r, message=FALSE, warning=FALSE}
+## Assemble dds object
+read_counts <- 
+  read_tsv("counts.tsv") |>
+  column_to_rownames("gene") |>
+  as.data.frame()
+
+condition <- factor(c(rep("ctrl", 4), rep("tx", 4)), levels = c("ctrl", "tx"))
+sample_info <- data.frame(condition = condition, 
+                          row.names = names(read_counts))
+
+dds <- DESeqDataSetFromMatrix(countData = read_counts,
+                              colData = sample_info,
+                              design = ~ condition)
+
+## Remove uninformative columns
+dds <- dds[rowSums(counts(dds)) > 1, ]
+
+## Normalization and preprocessing
+dds <- DESeq(dds)
+
+## Get log2-transformed and scaled gene expression data
+dds_rlog <- rlog(dds)
+counts_norm <- counts(dds, normalized = TRUE)
+counts_log2 <- log2(counts_norm + 1)
+counts_scaled <- t(scale(t(counts_log2)))
+
+## Get shrunken lfc results
+res <- results(dds, contrast = c("condition", "tx", "ctrl"))
+resLFC <- 
+  lfcShrink(dds, res = res, contrast = c("condition", "tx", "ctrl"), type = "ashr") |>
+  as_tibble(rownames = "symbol") |>
+  arrange(padj)
+```
+
+## Enrichment analysis with Clusterprofiler for GO
+```{r, message=FALSE, warning=FALSE}
+resLFC$entrez <- 
+  mapIds(org.Mm.eg.db, 
+         keys = resLFC$symbol, 
+         keytype = "SYMBOL", 
+         column = "ENTREZID")
+
+genes_GO_entrez <- 
+  resLFC |>
+  filter(!is.na(padj) & padj < 0.1) |>
+  filter(log2FoldChange > 0) |>
+  pull(entrez)
+
+ego <- enrichGO(gene          = genes_GO_entrez,
+                universe      = resLFC$entrez,
+                OrgDb         = org.Mm.eg.db,
+                ont           = c("BP"), 
+                pAdjustMethod = "fdr",
+                pvalueCutoff  = 0.05,
+                qvalueCutoff  = 0.1)
+
+ego_simp <- clusterProfiler::simplify(ego, cutoff = 0.6, by = "p.adjust", select_fun = min)
+ego_simp <- setReadable(ego_simp, 'org.Mm.eg.db', 'ENTREZID')
+
+results_GO <- summary(ego_simp)
+
+theme_dotplot <- 
+  theme(
+    axis.title = element_text(size = 6), 
+    axis.text.x = element_text(size = 5), 
+    axis.text.y = element_text(size = 5), 
+    legend.text = element_text(size = 5), 
+    legend.title = element_text(size = 5)
+  )
+
+GO_dotplot <- 
+  dotplot(ego_simp, 
+          showCategory = 15) +
+  theme_dotplot +
+  scale_size_continuous(range = c(0.5, 2)) +
+  theme(legend.key.size = unit(.1, "cm"), 
+        legend.position = "right", 
+        axis.text.x = element_text(size = 4))
+
+print(GO_dotplot)
+```
+
+## Heatmap of effector genes
+```{r, message=FALSE, warning=FALSE}
+## list of curated genes (from Chen and Flies, Nature Reviews, Immunol, 2013)
+curated_genes <- 
+  list(Effector = c("Ifng", "Gzmb", "Ccl3",  "Prf1", "Nkg7", "Klrg1"))
+
+counts_scaled_filt_effector <- 
+  counts_scaled[unlist(curated_genes$Effector), ]
+
+## ---------------------------------------------
+## Generate annotation
+## ---------------------------------------------
+gene_annotation_effector <- 
+  resLFC |>
+  as_tibble() |>
+  filter(symbol %in% unlist(curated_genes$Effector)) |>
+  arrange(match(symbol, unlist(curated_genes$Effector))) |>
+  mutate(padj = case_when(is.na(padj) ~ 1, 
+                          TRUE ~ padj), 
+         baseMean_log = log10(baseMean))
+
+ha_top_effector <- 
+  HeatmapAnnotation(condition = colData(dds)[, "condition"],
+                    col = list(condition = c(`ctrl` =  cols_RGX[[1]],
+                                             `tx` = cols_RGX[[2]])), 
+                    annotation_name_side = "left", 
+       annotation_name_gp = gpar(fontsize = 6),
+       show_legend = TRUE, 
+       simple_anno_size = unit(2, "mm")
+      )
+
+ha_right_effector <- 
+  HeatmapAnnotation(
+    which = "row",
+    "padj" = gene_annotation_effector$padj, 
+    "log2FC" = anno_barplot(gene_annotation_effector$log2FoldChange, 
+                                 border = FALSE, 
+                                 axis = TRUE, 
+                                 gp = gpar(fill = "grey40", col = "grey40"),
+                                 axis_param = list(gp = gpar(fontsize = 3),
+                                                   labels_rot = 0, 
+                                                   at = c(0, 0.5, 1))), 
+    col = list("padj" =  circlize::colorRamp2(c(0, 0.1), c("darkgreen", "white"))),
+    annotation_name_side = "top",
+    annotation_name_gp = gpar(fontsize = 5),
+    simple_anno_size = unit(0.15, "cm"),
+    annotation_width = unit.c(unit(0.1, "cm"), #unit(0.4, "cm"), 
+                              unit(0.4, "cm")),
+    annotation_legend_param = list(
+      labels_gp = gpar(fontsize = 5),
+      title_gp = gpar(fontsize = 6),
+      grid_height = unit(1.5, "mm"),
+      grid_width = unit(1.5, "mm"),
+      legend_direction = "vertical", 
+      legend_height = unit(0.1, "cm"),
+      legend_width = unit(1, "cm"), 
+      ncol = 1
+    ),
+    gp = gpar(col = "white", lwd = .15)
+)
+
+plot_hm_effector <-
+  Heatmap(counts_scaled_filt_effector,
+        top_annotation = ha_top_effector,
+        right_annotation = ha_right_effector, 
+        show_row_dend = TRUE,
+        show_column_names = FALSE,
+        name = "z-score",
+        column_dend_height = unit(3, "mm"),
+        cluster_columns = FALSE, 
+        row_dend_width = unit(3, "mm"),
+        row_names_gp = gpar(fontface = "italic", fontsize = 5), 
+        heatmap_legend_param = list(
+          labels_gp = gpar(fontsize = 5),
+          title_gp = gpar(fontsize = 6),
+          grid_height = unit(1.5, "mm"),
+          grid_width = unit(1.5, "mm"), 
+          legend_direction = "vertical",
+          legend_height = unit(0.1, "cm"),
+          legend_width = unit(2, "cm"), 
+          ncol = 1)
+        )
+
+draw(plot_hm_effector, merge_legend = TRUE,  heatmap_legend_side = "right")
+```
+
+## Session info
+```{r}
+devtools::session_info()
+```
