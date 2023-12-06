@@ -1,6 +1,6 @@
 # LXR agonism promotes T cell activation
 
-This repository contains the code to reproduce all figures from the manuscript
+This repository contains the code to reproduce figures from the manuscript
 ## Liver-X-receptor agonism promotes anti-tumor immunity by enhancing T cell activation
 XXX
 †*Correspondence*: benjamin.ostendorf@charite.de, sohail.tavazoie@rockefeller.edu 

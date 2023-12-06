@@ -368,3 +368,8 @@ ame_output |>
         axis.title.y = element_blank(), 
         axis.text.y = element_text(face = "italic")) 
 ```
+
+## Session info
+```{r}
+devtools::session_info()
+```
