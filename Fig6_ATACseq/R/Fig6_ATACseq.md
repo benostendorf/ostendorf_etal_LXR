@@ -1,0 +1,398 @@
+ATACseq of OT-I upon crosspresentation
+================
+Benjamin Ostendorf
+3/20/2021
+
+## Preamble
+
+``` r
+library(DiffBind)
+library(ChIPseeker)
+library(TxDb.Mmusculus.UCSC.mm10.knownGene)
+library(org.Mm.eg.db)
+library(ComplexHeatmap)
+library(memes)
+library(BSgenome.Mmusculus.UCSC.mm10)
+library(tidyverse)
+
+txdb <- TxDb.Mmusculus.UCSC.mm10.knownGene
+
+source("helper_functions.R")
+```
+
+``` r
+## --------------------------------------------------------
+## Import and calculate
+## --------------------------------------------------------
+if (!file.exists("diffbind_output.rds")) {
+  sample_sheet <- 
+    tibble(SampleID = c("ctrl_01", "ctrl_02", "tx_01", "tx_02"), 
+           Condition = c("ctrl", "ctrl", "tx", "tx"), 
+           Replicate = c(1, 2, 1, 2), 
+           bamReads = c("../../workflow/results/remove-chrM/ctrl_01.bam", 
+                        "../../workflow/results/remove-chrM/ctrl_02.bam", 
+                        "../../workflow/results/remove-chrM/tx_02.bam", 
+                        "../../workflow/results/remove-chrM/tx_02.bam"), 
+           Peaks = c("../data/processed/ctrl.narrowPeak",
+                     "../data/processed/ctrl.narrowPeak",
+                     "../data/processed/tx.narrowPeak",
+                     "../data/processed/tx.narrowPeak"), 
+           PeakCaller = c("narrow", "narrow", "narrow", "narrow"))
+  df <- dba(sampleSheet = sample_sheet)
+
+  ## Count reads
+  df <- dba.count(df)
+
+  ## Normalize
+  df <- dba.normalize(df)
+
+  ## Define contrast and run differential analysis
+  df <- dba.contrast(df, minMembers = 2, categories = DBA_CONDITION)
+  df <- dba.analyze(df, method = DBA_ALL_METHODS)
+  
+  saveRDS(df, file = "diffbind_output.rds")
+}
+```
+
+## Import and wrangle
+
+``` r
+## ------------------------------------------------------------
+## Import peaksets
+## ------------------------------------------------------------
+df <- readRDS("diffbind_output.rds")
+
+## Extract peaks for all replicates
+peaks <- dba.peakset(df, bRetrieve = TRUE)
+peaks$id <- rownames(mcols(peaks))
+
+## ------------------------------------------------------------
+## Differential peak analysis results
+## ------------------------------------------------------------
+## Set default analysis in dba object (DESeq2 vs edgeR) and FDR cutoff
+df$config$AnalysisMethod <- "edgeR"
+df$config$th <- 0.1
+
+## Extract different accessibility results (all peaks regardless of sig)
+peaks_res <- dba.report(df, th = 1)
+peaks_res$id <- rownames(mcols(peaks_res))
+
+## ------------------------------------------------------------
+## Change chr names from NCBI to UCSC for GRanges objects
+## ------------------------------------------------------------
+NCBItoUCSC_df <- read_tsv("NCBI_UCSC_chrom_conv.txt", col_names = c("NCBI", "UCSC"))
+NCBItoUCSC <- as.character(NCBItoUCSC_df$UCSC)
+names(NCBItoUCSC) <- NCBItoUCSC_df$NCBI
+
+peaks_res <- renameSeqlevels(peaks_res, NCBItoUCSC)
+peaks <- renameSeqlevels(peaks, NCBItoUCSC)
+
+## ------------------------------------------------------------
+## Annotate peaks for results and raw peaks
+## ------------------------------------------------------------
+peaks_anno <- annotatePeak(peaks, tssRegion = c(-3000, 3000),
+                           TxDb = txdb, annoDb = "org.Mm.eg.db")
+```
+
+    ## >> preparing features information...      2023-12-06 13:24:06 
+    ## >> identifying nearest features...        2023-12-06 13:24:07 
+    ## >> calculating distance from peak to TSS...   2023-12-06 13:24:09 
+    ## >> assigning genomic annotation...        2023-12-06 13:24:09 
+    ## >> adding gene annotation...          2023-12-06 13:24:26 
+    ## >> assigning chromosome lengths           2023-12-06 13:24:27 
+    ## >> done...                    2023-12-06 13:24:27
+
+``` r
+peaks <- peaks_anno@anno
+peaks <- plyranges::mutate(peaks, symbol = SYMBOL)
+
+
+peaks_res_anno <- annotatePeak(peaks_res, tssRegion = c(-3000, 3000),
+                               TxDb = txdb, annoDb = "org.Mm.eg.db")
+```
+
+    ## >> preparing features information...      2023-12-06 13:24:27 
+    ## >> identifying nearest features...        2023-12-06 13:24:27 
+    ## >> calculating distance from peak to TSS...   2023-12-06 13:24:28 
+    ## >> assigning genomic annotation...        2023-12-06 13:24:28 
+    ## >> adding gene annotation...          2023-12-06 13:24:32 
+    ## >> assigning chromosome lengths           2023-12-06 13:24:32 
+    ## >> done...                    2023-12-06 13:24:32
+
+``` r
+peaks_res <- peaks_res_anno@anno
+peaks_res <- plyranges::mutate(peaks_res, symbol = SYMBOL)
+
+## ------------------------------------------------------------
+## Extract significant peaks from all peaks
+## ------------------------------------------------------------
+peaks_res_sig <- peaks_res[peaks_res$FDR < 0.1]
+peak_IDs_sig <- rownames(mcols(peaks_res_sig))
+peaks_IDs_sig_up <- mcols(peaks_res[peaks_res$FDR < 0.1 & peaks_res$Fold > 0])$id
+peaks_IDs_sig_dn <- mcols(peaks_res[peaks_res$FDR < 0.1 & peaks_res$Fold < 0])$id
+
+peaks_sig <- peaks[peak_IDs_sig, ]
+peaks_sig_up <- peaks[peaks_IDs_sig_up, ]
+
+peaks_sig_dedup_top <-
+  peaks_sig_up |>
+  as.data.frame() |>
+  distinct(symbol, .keep_all = TRUE) |>
+  slice(1:100)
+
+## Annotate main peaks dataframe depending on differential analysis result
+peaks <-
+  peaks |>
+  plyranges::mutate(direction = case_when(id %in% peaks_IDs_sig_up ~ "up", 
+                                          id %in% peaks_IDs_sig_dn ~ "dn", 
+                                          TRUE ~ "n.s."))
+```
+
+## Heatmap for RNA-seq results
+
+``` r
+## Import RNAseq data
+resLFC_RNAseq <- read_tsv("../../Fig6_RNAseq/R/resLFC_RNAseq.tsv")
+counts_scaled_RNAseq_tibble <- read_tsv("../../Fig6_RNAseq/R/counts_scaled_RNAseq.tsv")
+counts_scaled_RNAseq <- as.matrix(select(counts_scaled_RNAseq_tibble, -1))
+rownames(counts_scaled_RNAseq) <- counts_scaled_RNAseq_tibble$symbol
+  
+
+## List of curated genes (from Chen and Flies, Nature Reviews, Immunol, 2013)
+curated_genes <- list(
+  `Co-stimulatory` = c("Cd28", "Icos", "Cd27", "Tnfrsf14", "Tnfsf14",  "Cd40lg", "Tnfrsf9", "Tnfrsf4", "Tnfrsf25", "Tnfrsf18", "Tnfrsf8", "Slamf6", "Cd2", "Cd226"), 
+  `Co-inhibitory` = c("Lag3", "Ctla4", "Cd274", "Pdcd1", "Cd160", "Btla", "Vsir", "Lair1",  "Havcr2", "Cd244a", "Tigit"), 
+  Effector = c("Ifng", "Gzmb", "Ccl3",  "Prf1", "Nkg7", "Klrg1")
+  )
+
+cluster_names <- 
+  unlist(map(names(curated_genes), function(x) rep(x, length(curated_genes[[x]]))))
+
+counts_scaled_filt_RNAseq <- 
+  counts_scaled_RNAseq[unlist(curated_genes), ]
+
+## ---------------------------------------------
+## Generate annotation
+## ---------------------------------------------
+gene_annotation_RNAseq <- 
+  resLFC_RNAseq |>
+  as_tibble() |>
+  filter(symbol %in% unlist(curated_genes)) |>
+  arrange(match(symbol, unlist(curated_genes))) |>
+  mutate(padj = case_when(is.na(padj) ~ 1, 
+                          TRUE ~ padj), 
+         baseMean_log = log10(baseMean))
+
+ha_top_RNAseq <- 
+  HeatmapAnnotation(condition = c(rep("untreated", 4), rep("treated", 4)),
+                    col = list(condition = c(`untreated` =  cols_RGX[[1]],
+                                             `treated` = cols_RGX[[2]])), 
+                    annotation_name_side = "left", 
+       annotation_name_gp = gpar(fontsize = 6),
+       show_legend = TRUE, 
+       simple_anno_size = unit(2, "mm")
+      )
+
+ha_right_RNAseq <- 
+  HeatmapAnnotation(
+    which = "row",
+    "padj" = gene_annotation_RNAseq$padj, 
+    "log2FC" = anno_barplot(gene_annotation_RNAseq$log2FoldChange, 
+                                 border = FALSE, 
+                                 axis = TRUE, 
+                                 gp = gpar(fill = "grey40", col = "grey40"),
+                                 axis_param = list(gp = gpar(fontsize = 3),
+                                                   labels_rot = 0, 
+                                                   at = c(0, 0.5, 1))), 
+    col = list("padj" =  circlize::colorRamp2(c(0, 0.1), c("darkgreen", "white"))),
+    annotation_name_side = "top",
+    annotation_name_gp = gpar(fontsize = 5),
+    simple_anno_size = unit(0.15, "cm"),
+    annotation_width = unit.c(unit(0.1, "cm"), #unit(0.4, "cm"), 
+                              unit(0.4, "cm")),
+    annotation_legend_param = list(
+      labels_gp = gpar(fontsize = 5),
+      title_gp = gpar(fontsize = 6),
+      grid_height = unit(1.5, "mm"),
+      grid_width = unit(1.5, "mm"),
+      legend_direction = "vertical", 
+      legend_height = unit(0.1, "cm"),
+      legend_width = unit(1, "cm"), 
+      ncol = 1
+    ),
+    gp = gpar(col = "white", lwd = .15)
+)
+
+hm_RNAseq <-
+  Heatmap(counts_scaled_filt_RNAseq,
+        top_annotation = ha_top_RNAseq,
+        right_annotation = ha_right_RNAseq, 
+        split = cluster_names,
+        show_row_dend = TRUE,
+        show_column_names = FALSE,
+        name = "z-score",
+        column_title = "RNA-seq",
+        column_dend_height = unit(3, "mm"),
+        cluster_columns = FALSE, 
+        row_dend_width = unit(3, "mm"),
+        row_names_gp = gpar(fontface = "italic", fontsize = 5), 
+        heatmap_legend_param = list(
+          labels_gp = gpar(fontsize = 5),
+          title_gp = gpar(fontsize = 6),
+          grid_height = unit(1.5, "mm"),
+          grid_width = unit(1.5, "mm"), 
+          legend_direction = "vertical",
+          legend_height = unit(0.1, "cm"),
+          legend_width = unit(1, "cm"), 
+          ncol = 1)
+        )
+```
+
+## Heatmap of curated sets together with corresponding RNAseq heatmap
+
+``` r
+## Get peaks with lowest FDR per gene
+peaks_curated <- 
+  mcols(peaks_res[peaks_res$symbol %in% unlist(curated_genes)]) |>
+  as_tibble(rownames = "peak_ID") |>
+  arrange(symbol, FDR) |>
+  distinct(symbol, .keep_all = TRUE)
+peaks_curated <- peaks_curated[match(unlist(curated_genes), peaks_curated$symbol), ]
+
+scaled_peaks <- 
+  peaks[peaks_curated$peak_ID, ] |>
+  mcols() |>
+  as_tibble() %>%
+  .[, 1:4] %>%
+  as.matrix() %>%
+  t() %>%
+  log2 %>%
+  scale() %>%
+  t()
+rownames(scaled_peaks) <- peaks_curated$symbol
+
+## ---------------------------------------------
+## Generate annotation
+## ---------------------------------------------
+gene_annotation <- 
+  mcols(peaks_res[peaks_curated$peak_ID, ]) |>
+  as_tibble()
+
+ha_top <- 
+  HeatmapAnnotation(condition = c("Ctrl", "Ctrl", "RGX-104", "RGX-104"),
+                    col = list(condition = c(`Ctrl` =  cols_RGX[[1]],
+                                             `RGX-104` = cols_RGX[[2]])), 
+                    annotation_name_side = "left", 
+                    show_annotation_name = FALSE, 
+       annotation_name_gp = gpar(fontsize = 6), 
+       show_legend = FALSE, 
+       simple_anno_size = unit(2, "mm")
+      )
+
+ha_right <- 
+  HeatmapAnnotation(
+    which = "row",
+    "padj" = gene_annotation$FDR, 
+    "log2FC" = anno_barplot(gene_annotation$Fold, 
+                                 border = FALSE, 
+                                 axis = TRUE, 
+                                 gp = gpar(fill = "grey40", col = "grey40"),
+                                 axis_param = list(gp = gpar(fontsize = 3),
+                                                   labels_rot = 0, 
+                                                   at = c(0, 0.5, 1))), 
+    col = list("padj" =  circlize::colorRamp2(c(0, 0.1), c("darkgreen", "white"))),
+    annotation_name_side = "top",
+    annotation_name_gp = gpar(fontsize = 5),
+    simple_anno_size = unit(0.15, "cm"),
+    annotation_width = unit.c(unit(0.1, "cm"), #unit(0.4, "cm"), 
+                              unit(0.4, "cm")),
+    annotation_legend_param = list(
+      labels_gp = gpar(fontsize = 5),
+      title_gp = gpar(fontsize = 6),
+      grid_height = unit(1.5, "mm"),
+      grid_width = unit(1.5, "mm"),
+      legend_direction = "vertical", 
+      legend_width = unit(1, "cm"), 
+      ncol = 1
+    ),
+    gp = gpar(col = "white", lwd = .15)
+)
+
+hm_ATACseq <-
+  Heatmap(scaled_peaks,
+        top_annotation = ha_top,
+        right_annotation = ha_right, 
+        split = cluster_names,
+        show_column_names = FALSE,
+        name = "z-score",
+        column_title = "ATAC-seq",
+        column_dend_height = unit(3, "mm"),
+        cluster_columns = FALSE, 
+        row_dend_width = unit(3, "mm"),
+        row_names_gp = gpar(fontface = "italic", fontsize = 5), 
+        heatmap_legend_param = list(
+          labels_gp = gpar(fontsize = 5),
+          title_gp = gpar(fontsize = 6),
+          grid_height = unit(1.5, "mm"),
+          grid_width = unit(1.5, "mm"), 
+          legend_direction = "vertical",
+          legend_width = unit(1, "cm"), 
+          ncol = 1)
+        )
+
+hm_list <- hm_RNAseq + hm_ATACseq
+draw(hm_list, merge_legend = TRUE,  heatmap_legend_side = "right")
+```
+
+![](Fig6_ATACseq_files/figure-gfm/unnamed-chunk-5-1.png)<!-- -->
+
+## Memes
+
+``` r
+## -----------------------------------------------------------
+## Pre-requisites memes analysis
+## -----------------------------------------------------------
+
+## Set genome
+mm10_genome <- BSgenome.Mmusculus.UCSC.mm10::BSgenome.Mmusculus.UCSC.mm10
+
+## Set path to meme suite programs
+options(meme_bin = "~/tools/meme/bin/")
+
+## Download and set path to hocomoco motif database (from website https://hocomoco11.autosome.ru/downloads_v11)
+if (!file.exists("HOCOMOCOv11_core_MOUSE_mono_meme_format.meme")){
+  download.file("https://hocomoco11.autosome.ru/final_bundle/hocomoco11/core/MOUSE/mono/HOCOMOCOv11_core_MOUSE_mono_meme_format.meme", 
+                destfile = "HOCOMOCOv11_core_MOUSE_mono_meme_format.meme")
+}
+options(meme_db = "HOCOMOCOv11_core_MOUSE_mono_meme_format.meme")
+
+## Prepare input peaks: use only promoter peaks and restrict to 100bp window around summit
+seqs_peaks_flanks <- 
+  peaks[grepl("Promoter", peaks$annotation)] |>
+  plyranges::anchor_center() |>
+  plyranges::mutate(width = 100) %>%
+  split(mcols(.)$direction) |>
+  get_sequence(mm10_genome)
+
+## -----------------------------------------------------------
+## Memes analysis
+## -----------------------------------------------------------
+ame_output <- runAme(seqs_peaks_flanks, control = c("n.s.", "dn"))
+
+ame_output |>
+  dplyr::bind_rows(.id = "direction") |>
+  dplyr::arrange(-adj.pvalue) |>
+  dplyr::mutate(motif_id = forcats::fct_reorder(motif_id, direction)) |>
+  dplyr::mutate(motif_id = gsub("(.*)_MOUSE.*", "\\1", motif_id)) |>
+  dplyr::mutate(motif_id = stringr::str_to_title(motif_id)) |>
+  plot_ame_heatmap(group = direction) +
+  theme_custom2 +
+  coord_flip() +
+  guides(x = guide_axis(angle = 45)) +
+  ggtitle("Motif enrichment in \ndifferentially accessible promoter peaks") +
+  theme(legend.title = element_text(size = 5), 
+        axis.title.y = element_blank(), 
+        axis.text.y = element_text(face = "italic")) 
+```
+
+![](Fig6_ATACseq_files/figure-gfm/unnamed-chunk-6-1.png)<!-- -->
